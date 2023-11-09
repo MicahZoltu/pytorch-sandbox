@@ -1,3 +1,4 @@
+import gzip
 import math
 import pickle
 import statistics
@@ -119,9 +120,8 @@ def main():
 	MOMENTUM = 0.9
 	WIDTH = 28
 	HEIGHT = 28
-
 	# load training data into memory
-	with (open('./training-data/mnist.pkl', 'rb')) as file:
+	with (gzip.open('./training-data/mnist.pkl.gz', 'rb')) as file:
 		((training_input, training_expected), (validation_input, validation_expected), _) = pickle.load(file, encoding="latin-1")
 	# convert numpy arrays to torch tensors
 	training_input, training_expected, validation_input, validation_expected = map(tensor, (training_input, training_expected, validation_input, validation_expected))
