@@ -5,9 +5,9 @@ import statistics
 import torch
 from datetime import timedelta
 from time import perf_counter
-from typing import Callable
+from typing import Callable, List
 from functools import partial, reduce
-from torch.nn.functional import conv2d, relu, adaptive_avg_pool2d, cross_entropy, softmax
+from torch.nn.functional import conv2d, leaky_relu, adaptive_avg_pool2d, cross_entropy, softmax
 from torch.utils.data import DataLoader, TensorDataset
 
 RED = '\033[31m'
@@ -21,7 +21,7 @@ zero_tensor = partial(torch.zeros, device=device)
 tensor = partial(torch.tensor, device=device)
 
 def get_model_and_parameters(possible_predictions: int, width: int, height: int):
-	parameters = []
+	parameters: List[torch.nn.Parameter] = []
 	def generate_2d_convolutional_layer(num_input_channels: int, num_output_channels: int, kernel_size: int,num_groups: int,stride: int, padding: int):
 		nonlocal parameters
 		weight_tensor = empty_tensor(num_output_channels, num_input_channels // num_groups, kernel_size, kernel_size)
@@ -31,7 +31,7 @@ def get_model_and_parameters(possible_predictions: int, width: int, height: int)
 		bias_parameter = torch.nn.Parameter(torch.nn.init.uniform_(bias_tensor, -bound, bound))
 		parameters.append(weight_parameter)
 		parameters.append(bias_parameter)
-		return lambda x: relu(conv2d(x, weight_parameter, bias_parameter, stride, padding))
+		return lambda x: leaky_relu(conv2d(x, weight_parameter, bias_parameter, stride, padding))
 	layers = [
 		lambda x: x.view(-1, 1, width, height),
 		generate_2d_convolutional_layer(num_input_channels=1, num_output_channels=16, kernel_size=3, num_groups=1, stride=2, padding=1),
@@ -86,17 +86,34 @@ def train(runner: Callable[[torch.Tensor], torch.Tensor], optimizer: torch.optim
 		previous_average_loss = average_loss
 	print()
 
-def validate(runner: Callable[[torch.Tensor], torch.Tensor], optimizer: torch.optim.SGD, dataloader: DataLoader):
+def validate(runner: Callable[[torch.Tensor], torch.Tensor], dataloader: DataLoader):
+	print(f'Validating...')
 	validation_start = perf_counter()
 	batch_seconds = []
+	validation_results: List[tuple[bool, int, float, int, float]] = []
+	total_items_validated = 0
 	for input_batch, expected_batch in dataloader:
+		total_items_validated += len(input_batch)
 		batch_start = perf_counter()
 		output_batch = runner(input_batch)
 		batch_seconds.append(perf_counter() - batch_start)
-		print_validation_results(output_batch, expected_batch)
+		for i, output in enumerate(output_batch):
+			correct, expected, expected_prob, top, top_prob = calculate_accuracy(output, expected_batch[i].item())
+			validation_results.append((correct, expected, expected_prob, top, top_prob))
+			if not correct: print_validation_result(correct, expected, expected_prob, top, top_prob)
 	validation_seconds = perf_counter() - validation_start
 	average_batch_seconds = statistics.fmean(batch_seconds)
+	num_correct = sum(x[0] for x in validation_results)
+	print(f'Correct Validations: {GREEN}{num_correct} / {total_items_validated}{RESET}')
 	print(f'Validation Duration: {GREEN}{timedelta(seconds=validation_seconds)}{RESET}  Average Batch Duration: {GREEN}{timedelta(seconds=average_batch_seconds)}{RESET}')
+
+def calculate_accuracy(log_probabilities: torch.Tensor, expected: int):
+	probabilities: List[float] = softmax(log_probabilities, dim=-1).tolist()
+	top: int = log_probabilities.argmax().item()
+	probability_of_expected = probabilities[expected]
+	probability_of_top = probabilities[top]
+	correct = top == expected
+	return (correct, expected, probability_of_expected, top, probability_of_top)
 
 def print_progress(epoch: int, output_batch: torch.Tensor, expected_batch: torch.Tensor, average_loss: float, previous_average_loss: float, epoch_seconds: float, average_batch_seconds: float, is_epoch: bool):
 	accuracy = check_batch_accuracy(output_batch, expected_batch)
@@ -104,22 +121,17 @@ def print_progress(epoch: int, output_batch: torch.Tensor, expected_batch: torch
 	batch_duration = timedelta(seconds=average_batch_seconds)
 	print(f'Epoch: {GREEN}{epoch}{RESET}  Loss: {GREEN if average_loss < previous_average_loss else RED}{average_loss:8.5f}{RESET}  Accuracy: {GREEN if accuracy > 0.9 else RED}{accuracy:7.5f}{RESET}  Epoch Duration: {GREEN}{epoch_duration}{RESET}  Average Batch Duration: {GREEN}{batch_duration}{RESET}', end = '\n' if is_epoch else '\r')
 
-def print_validation_results(output_batch: torch.Tensor, expected_batch: torch.Tensor):
-	for i, output in enumerate(output_batch):
-		expected = expected_batch[i].item()
-		probabilities = softmax(output, dim=-1)
-		expected_probability = probabilities[expected].item()
-		top = output.argmax().item()
-		top_probability = probabilities[top].item()
-		print(f'Expected: {GREEN}{expected}{RESET}  Expected Probability: {GREEN if expected_probability > 0.5 else RED}{expected_probability:7.5f}{RESET}  Top: {GREEN if top == expected else RED}{top}{RESET}  Top Probability: {GREEN if top_probability > 0.5 else RED}{top_probability:7.5f}{RESET} ')
+def print_validation_result(correct: bool, expected: int, expected_probability: float, top: int, top_probability: float):
+	print(f'Expected: {GREEN}{expected}{RESET}  Expected Probability: {GREEN if expected_probability > 0.5 else RED}{expected_probability:7.5f}{RESET}  Top: {GREEN if correct else RED}{top}{RESET}  Top Probability: {GREEN if top_probability > 0.5 else RED}{top_probability:7.5f}{RESET} ')
 
 def main():
-	EPOCHS = 100
+	EPOCHS = 1000
 	BATCH_SIZE = 512
-	LEARNING_RATE = 0.5
+	LEARNING_RATE = 0.9
 	MOMENTUM = 0.9
 	WIDTH = 28
 	HEIGHT = 28
+
 	# load training data into memory
 	with (gzip.open('./training-data/mnist.pkl.gz', 'rb')) as file:
 		((training_input, training_expected), (validation_input, validation_expected), _) = pickle.load(file, encoding="latin-1")
@@ -133,7 +145,7 @@ def main():
 
 	training_dataset = TensorDataset(training_input, training_expected)
 	training_dataloader = DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
-	validation_dataset = TensorDataset(validation_input[0:100], validation_expected[0:100])
+	validation_dataset = TensorDataset(validation_input, validation_expected)
 	validation_dataloader = DataLoader(validation_dataset, batch_size=1, shuffle=True)
 
 	possible_predictions = torch.unique(training_expected).numel()
@@ -141,7 +153,7 @@ def main():
 	optimizer = torch.optim.SGD(parameters, LEARNING_RATE, MOMENTUM)
 
 	train(model, optimizer, training_dataloader, EPOCHS)
-	validate(model, optimizer, validation_dataloader)
+	validate(model, validation_dataloader)
 
 start = perf_counter()
 main()
