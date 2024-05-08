@@ -125,7 +125,7 @@ def print_validation_result(correct: bool, expected: int, expected_probability: 
 	print(f'Expected: {GREEN}{expected}{RESET}  Expected Probability: {GREEN if expected_probability > 0.5 else RED}{expected_probability:7.5f}{RESET}  Top: {GREEN if correct else RED}{top}{RESET}  Top Probability: {GREEN if top_probability > 0.5 else RED}{top_probability:7.5f}{RESET} ')
 
 def main():
-	EPOCHS = 1000
+	EPOCHS = 100
 	BATCH_SIZE = 512
 	LEARNING_RATE = 0.9
 	MOMENTUM = 0.9
